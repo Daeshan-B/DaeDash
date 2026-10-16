@@ -1,0 +1,679 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DaeDash — '79 RX-7 13B Digital Cluster</title>
+<style>
+  :root{
+    --bg:#050505; --panel:#000; --accent:#ff9d2e; --amber:#ff9d2e; --red:#ff3131;
+  }
+  *{box-sizing:border-box; margin:0; padding:0;}
+  body{
+    background:var(--bg); color:#c8c8c8; font-family:'Segoe UI',Helvetica,Arial,sans-serif;
+    display:flex; flex-direction:column; align-items:center; min-height:100vh; gap:14px; padding:16px;
+  }
+  h1{font-size:15px; letter-spacing:4px; color:#bbb; text-transform:uppercase; font-weight:600;}
+  h1 b{color:var(--accent);}
+  #cluster{
+    display:flex; align-items:center; justify-content:center; gap:10px;
+    background:#000; padding:14px; border-radius:10px;
+    box-shadow:0 0 40px rgba(0,0,0,.8) inset, 0 4px 20px rgba(0,0,0,.6);
+    flex-wrap:wrap;
+  }
+  .screen{background:#000;}
+  #leftWrap{display:flex; align-items:center; gap:6px;}
+  /* momentary dash button directly beside the left screen */
+  #btnPage{
+    width:34px; height:34px; min-width:34px; padding:0; border-radius:50%; border:none;
+    background:#0d0d0d; color:var(--amber); font-size:15px; line-height:1;
+  }
+  #btnPage:hover{background:#1a1a1a;}
+  #btnPage.active,#btnPage:active{background:var(--amber); color:#000;}
+  #leftScreen,#rightScreen{width:240px;height:320px;}
+  #centerScreen{width:320px;height:320px;}
+  /* dedicated warning-indicator strip: own section, wide readable rectangles */
+  #lampStrip{
+    display:flex; gap:2px; width:min(860px,96vw); margin-top:2px;
+  }
+  .lamp{
+    flex:1 1 0; height:56px; display:flex; align-items:center; justify-content:center;
+    background:#3a0e0e; color:#000; font-weight:700; font-size:15px; letter-spacing:1px;
+    text-transform:uppercase; border-radius:3px; user-select:none;
+  }
+  .lamp.on{ background:var(--red); box-shadow:0 0 14px rgba(255,59,48,.7); }
+  #controls{
+    display:flex; gap:10px; align-items:center; flex-wrap:wrap; justify-content:center; max-width:1000px;
+  }
+  button{
+    background:#0d0d0d; color:#c8c8c8; border:none; border-radius:6px;
+    padding:10px 18px; font-size:14px; font-weight:600; cursor:pointer; user-select:none;
+    touch-action:none; letter-spacing:1px;
+  }
+  button:hover{background:#1a1a1a;}
+  button.active{background:var(--amber); color:#000;}
+  button.gearBtn{min-width:70px;}
+  button.brake.active{background:var(--red);color:#fff;}
+  button.small{padding:8px 12px;font-size:12px;background:#080808;}
+  #help{font-size:12px;color:#666;text-align:center;line-height:1.7;}
+  kbd{background:#1c1c20;border:none;border-radius:4px;padding:1px 6px;color:#aaa;font-size:11px;}
+</style>
+</head>
+<body>
+
+<h1><b>DAE</b>DASH &nbsp;·&nbsp; 1979 RX-7 · 13B · 6-SPEED</h1>
+
+<div id="cluster">
+  <div id="leftWrap">
+    <canvas id="leftScreen"  class="screen" width="240" height="320"></canvas>
+    <button id="btnPage" title="Cycle gauge (hold to advance)">◉</button>
+  </div>
+  <canvas id="centerScreen" class="screen" width="320" height="320"></canvas>
+  <canvas id="rightScreen" class="screen" width="240" height="320"></canvas>
+</div>
+
+<div id="lampStrip">
+  <div class="lamp" id="lBrake">Brake</div>
+  <div class="lamp" id="lCoolant">Coolant</div>
+  <div class="lamp" id="lGen">Gen</div>
+  <div class="lamp" id="lOil">Oil</div>
+  <div class="lamp" id="lBelt">Belt</div>
+  <div class="lamp" id="lLamp">Head Lamp</div>
+</div>
+
+<div id="controls">
+  <button id="btnGas"   style="background:#1a1206;color:#ffb45e;">⛽ GAS (hold)</button>
+  <button id="btnBrake" class="brake">🛑 BRAKE (hold)</button>
+  <button id="btnUp"    class="gearBtn">▲ UP</button>
+  <button id="btnDown"  class="gearBtn">▼ DOWN</button>
+  <button id="btnRev"   class="gearBtn">R REV</button>
+  <button id="btnNeutral" class="gearBtn">N</button>
+  <button id="btnStart" class="small">ENGINE: <span id="engState">OFF</span></button>
+  <button id="btnReset" class="small">RESET</button>
+</div>
+
+<div id="help">
+  <kbd>↑</kbd> throttle &nbsp; <kbd>↓</kbd> brake &nbsp; <kbd>Space</kbd> upshift &nbsp; <kbd>Shift+Space</kbd>/<kbd>Backspace</kbd> downshift &nbsp; <kbd>R</kbd> reverse (at stop) &nbsp; <kbd>N</kbd> neutral &nbsp; <kbd>E</kbd> engine on/off &nbsp; <kbd>G</kbd> swap left-screen gauges
+</div>
+
+<script>
+"use strict";
+/* =====================================================================
+   DaeDash — browser template for ILI9341 triple-screen cluster
+   Left  240x320 : one big gauge — button/G cycles FUEL → OIL → COOLANT → VOLTAGE
+   Center 320x320: one big circle — Tachometer (+ gear, odo, lamps)
+   Right 240x320 : larger circle — Speedometer
+   ===================================================================== */
+
+const PI = Math.PI, TAU = PI*2;
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+const lerp=(a,b,t)=>a+(b-a)*t;
+
+/* ---------- car spec: Rx-8 13B (~220hp) into SA22C, 6-speed ---------- */
+const CAR = {
+  mass: 955,            // kg (SA22C ~950kg)
+  gears: [3.621, 2.198, 1.526, 1.149, 0.935, 0.780], // RX-8 6MT close ratios
+  final: 3.909,
+  tireDia: 0.584,       // m (185/60R15)
+  redline: 7500,
+  revLimit: 7800,
+  idle: 900,
+  stall: 550,
+  maxRpm: 8000,
+  cd: 0.34, area: 1.9, crr: 0.015, rho: 1.225,
+  brakeAccelMax: 10.5,
+  driveEff: 0.90,
+};
+
+/* torque curve of a tuned 13B twin-rotor, Nm at crank */
+function rotorTorque(rpm){
+  if(rpm < CAR.idle*0.6) return 0;
+  const t = [
+    [ 800, 90],[1500,140],[2500,175],[3500,200],[4500,215],
+    [5500,220],[6500,205],[7500,175],[8000,120]
+  ];
+  let out = t[0][1];
+  for(let i=0;i<t.length-1;i++){
+    if(rpm>=t[i][0] && rpm<=t[i+1][0]){
+      const f=(rpm-t[i][0])/(t[i+1][0]-t[i][0]);
+      out=lerp(t[i][1],t[i+1][1],f); break;
+    }
+  }
+  if(rpm>t[t.length-1][0]) out=0;
+  return out;
+}
+
+function rpmFromSpeed(gearIdx, vms){
+  if(gearIdx<0) return 0;
+  const ratio = CAR.gears[gearIdx]*CAR.final;
+  const wheelRps = vms/(TAU*CAR.tireDia/2);
+  return wheelRps*60*ratio;
+}
+function speedFromRpm(gearIdx, rpm){
+  if(gearIdx<0) return 0;
+  const ratio = CAR.gears[gearIdx]*CAR.final;
+  const wheelRps = rpm/60/ratio;
+  return wheelRps*TAU*CAR.tireDia/2;
+}
+
+/* ---------- state ---------- */
+const S = {
+  running:false,
+  v:0, gear:1,              // gear: -1=R, 0=N, 1..6
+  throttle:0, brake:0, throttleCmd:0, brakeCmd:0,
+  rpm:0, rpmNeedle:0, speedNeedle:0,
+  shifting:0,
+  fuel:0.92, oilT:25, coolT:25, volt:12.4,
+  odometer:131406.2, trip:0,
+  gearFlash:0, revLimiter:0, stallFlash:0,
+  time:0,
+  leftPage:0,               // 0=FUEL 1=OIL 2=COOLANT 3=VOLTAGE (momentary button beside screen)
+};
+
+const keys={up:false,down:false};
+
+/* ---------- input ---------- */
+const btnGas=document.getElementById('btnGas'),
+      btnBrake=document.getElementById('btnBrake');
+
+function bindHold(el,onDown,onUp){
+  el.addEventListener('pointerdown',e=>{e.preventDefault();el.setPointerCapture(e.pointerId);el.classList.add('active');onDown();});
+  const up=()=>{el.classList.remove('active');onUp&&onUp();};
+  el.addEventListener('pointerup',up);
+  el.addEventListener('pointercancel',up);
+}
+bindHold(btnGas,()=>S.throttleCmd=1,()=>S.throttleCmd=0);
+bindHold(btnBrake,()=>S.brakeCmd=1,()=>S.brakeCmd=0);
+
+document.getElementById('btnUp').addEventListener('click',()=>shiftUp());
+document.getElementById('btnDown').addEventListener('click',()=>shiftDown());
+document.getElementById('btnRev').addEventListener('click',()=>engageReverse());
+document.getElementById('btnNeutral').addEventListener('click',()=>{if(Math.abs(S.v)<1){S.gear=0;S.gearFlash=1;}});
+document.getElementById('btnStart').addEventListener('click',toggleEngine);
+document.getElementById('btnReset').addEventListener('click',resetAll);
+
+// momentary dash button beside the left screen: each press cycles gauge.
+// (matches real hardware — a momentary switch on an ESP32 input pin)
+const btnPage=document.getElementById('btnPage');
+btnPage.addEventListener('pointerdown',e=>{
+  e.preventDefault();
+  btnPage.classList.add('active');
+  toggleLeftPage();
+});
+['pointerup','pointercancel','pointerleave'].forEach(ev=>
+  btnPage.addEventListener(ev,()=>btnPage.classList.remove('active')));
+
+function toggleLeftPage(){
+  S.leftPage=(S.leftPage+1)%4;
+}
+
+window.addEventListener('keydown',e=>{
+  if(e.repeat) return;
+  switch(e.code){
+    case 'ArrowUp': keys.up=true; e.preventDefault(); break;
+    case 'ArrowDown': keys.down=true; e.preventDefault(); break;
+    case 'Space': e.preventDefault(); e.shiftKey?shiftDown():shiftUp(); break;
+    case 'Backspace': e.preventDefault(); shiftDown(); break;
+    case 'KeyR': engageReverse(); break;
+    case 'KeyN': if(Math.abs(S.v)<1){S.gear=0;S.gearFlash=1;} break;
+    case 'KeyE': toggleEngine(); break;
+    case 'KeyG': toggleLeftPage(); break;
+  }
+});
+window.addEventListener('keyup',e=>{
+  if(e.code==='ArrowUp') keys.up=false;
+  if(e.code==='ArrowDown') keys.down=false;
+});
+
+function toggleEngine(){
+  S.running=!S.running;
+  document.getElementById('engState').textContent=S.running?'ON':'OFF';
+}
+function resetAll(){
+  Object.assign(S,{running:false,v:0,gear:1,rpm:0,rpmNeedle:0,speedNeedle:0,
+    throttle:0,fuel:0.92,oilT:25,coolT:25,volt:12.4,trip:0,shifting:0});
+  document.getElementById('engState').textContent='OFF';
+}
+
+function shiftUp(){
+  if(S.gear>=6||S.shifting>0) return;
+  if(S.gear===-1){S.gear=0;return;}
+  S.gear++; S.gearFlash=1; S.shifting=0.35;
+}
+function shiftDown(){
+  if(S.gear<=0||S.shifting>0) return;
+  S.gear--; S.gearFlash=1; S.shifting=0.35;
+}
+function engageReverse(){
+  if(Math.abs(S.v)>0.3 || S.gear===-1) return;
+  S.gear=-1; S.gearFlash=1;
+}
+
+/* ---------- physics ---------- */
+function step(dt){
+  S.time+=dt;
+  const thrIn = keys.up?1:S.throttleCmd;
+  const brkIn = keys.down?1:S.brakeCmd;
+  S.throttle = lerp(S.throttle, thrIn, 1-Math.exp(-dt*(thrIn>S.throttle?10:6)));
+  S.brake    = lerp(S.brake,    brkIn, 1-Math.exp(-dt*(brkIn>S.brake?14:10)));
+
+  const engaged = S.running;
+  const inGear = S.gear!==0;
+  let force=0;
+
+  // engine rpm dynamics
+  let wheelRpm = 0;
+  if(inGear && S.gear>0) wheelRpm = rpmFromSpeed(S.gear-1,S.v);
+
+  if(S.shifting>0){
+    S.shifting-=dt;
+    S.rpm = lerp(S.rpm, engaged?CAR.idle:0, 1-Math.exp(-dt*8));
+  } else if(inGear && S.gear>0 && engaged){
+    const target=Math.max(wheelRpm, CAR.stall);
+    if(target<=CAR.stall+50 && Math.abs(S.v)<0.5){
+      S.rpm = lerp(S.rpm, CAR.idle+S.throttle*2000, 1-Math.exp(-dt*6));
+    } else {
+      S.rpm = lerp(S.rpm, target, 1-Math.exp(-dt*20));
+    }
+  } else {
+    S.rpm = lerp(S.rpm, engaged?CAR.idle+S.throttle*3000:0, 1-Math.exp(-dt*(engaged?5:10)));
+  }
+
+  // rev limiter
+  S.revLimiter=0;
+  if(S.rpm>CAR.revLimit){ S.rpm=CAR.revLimit; S.revLimiter=1; }
+
+  // torque → wheel force (rotor slip/torque-converter factor keeps 0-60 realistic)
+  if(engaged && inGear && S.gear>0 && S.shifting<=0){
+    const tq = rotorTorque(clamp(S.rpm,CAR.idle*0.7,CAR.maxRpm))*S.throttle;
+    const ratio = CAR.gears[S.gear-1]*CAR.final;
+    const launchFactor = Math.abs(S.v)<8 ? clamp(0.35+Math.abs(S.v)/8*0.6,0.35,0.95) : 1; // clutch slip off the line
+    force = tq*ratio*CAR.driveEff*launchFactor/(CAR.tireDia/2);
+  }
+  // reverse: strong gearing but torque-converter-like slip; creeps quickly, limited force
+  if(engaged && S.gear===-1){
+    const revTq = rotorTorque(clamp(CAR.idle+S.throttle*1500,CAR.idle,CAR.maxRpm))*S.throttle*0.45;
+    force = -revTq*CAR.gears[0]*CAR.final*CAR.driveEff/(CAR.tireDia/2)*0.22;
+  }
+
+  // resistances (static friction holds car until drive force overcomes it)
+  const dragF = 0.5*CAR.rho*CAR.cd*CAR.area*S.v*Math.abs(S.v);
+  const rollMag = CAR.crr*CAR.mass*9.81;
+  let brakeF = 0;
+  if(S.brake>0.02){
+    brakeF = -Math.sign(S.v)*S.brake*CAR.brakeAccelMax*CAR.mass;
+    if(Math.abs(S.v)<0.3 && S.brake>0.5) S.v=0;
+  }
+  let rollF;
+  if(Math.abs(S.v)>0.05){
+    rollF = rollMag*Math.sign(S.v);              // kinetic rolling resistance
+  } else {
+    const otherNet = force + brakeF - dragF;      // all non-rolling forces
+    rollF = clamp(otherNet, -rollMag, rollMag);   // static: match demand up to limit
+    if(Math.abs(otherNet)<=rollMag+1) S.v*=Math.exp(-dt*8); // held stationary
+  }
+
+  const net = force - dragF - rollF + brakeF;
+  S.v += (net/CAR.mass)*dt;
+  if(!engaged && Math.abs(S.v)<0.05 && S.brake>0.5) S.v=0;
+  if(Math.abs(S.v)<0.015 && force===0) S.v=0;
+  if(S.v<-8) S.v=-8; // reverse speed limiter
+
+  // ---- dynamic gauge sim ----
+  const rpmN = clamp(S.rpm,0,CAR.maxRpm);
+  const load = S.throttle*(rpmN/CAR.redline);
+  const moving = Math.abs(S.v)>0.5;
+
+  // oil temp (stored °C, displayed °F)
+  const oilTarget = 60 + load*38 + (rpmN/CAR.redline)*18 + (engaged?12:0) - (moving?clamp(Math.abs(S.v)/40,0,1)*6:0);
+  S.oilT = lerp(S.oilT, engaged?clamp(oilTarget,20,135):lerp(S.coolT,25,0.5), 1-Math.exp(-dt*(engaged?0.22:0.05)));
+
+  // coolant: slow warm-up, plateau at operating temp
+  const coolTarget = engaged ? 82 + load*8 + (rpmN/CAR.redline)*4 : 25;
+  const rate = engaged?(S.coolT<60?0.05:0.10):0.02;
+  S.coolT = lerp(S.coolT, coolTarget, 1-Math.exp(-dt*rate));
+
+  // battery voltage
+  let vTarget;
+  if(!engaged) vTarget = 12.4;
+  else if(S.rpm<CAR.idle+250 && S.throttle>0.5) vTarget=12.9;
+  else vTarget = 13.6 + clamp((rpmN-1500)/6000,0,1)*0.6;
+  S.volt = lerp(S.volt, vTarget, 1-Math.exp(-dt*2));
+
+  // fuel burn
+  if(engaged){
+    const flow = 0.4 + load*4.5 + rpmN/8000*1.2; // grams-ish per second scaled
+    S.fuel = clamp(S.fuel - flow*dt/3600*0.9, 0, 1);
+  }
+
+  // odometer / trip (km)
+  const distKm = Math.abs(S.v)*dt/1000;
+  S.odometer+=distKm; S.trip+=distKm;
+
+  // needle dynamics (inertia + idle wobble vibration)
+  const vib = engaged? (1-clamp(rpmN/2500,0,1))*0.5 : 0;
+  const rpmFrac = clamp(rpmN/CAR.maxRpm,0,1);
+  S.rpmNeedle = lerp(S.rpmNeedle, rpmFrac + vib*Math.sin(S.time*38)*0.008, 1-Math.exp(-dt*14));
+  S.speedNeedle = lerp(S.speedNeedle, clamp(Math.abs(S.v)*2.23694/160,0,1), 1-Math.exp(-dt*8));
+
+  S.gearFlash=Math.max(0,S.gearFlash-dt*2);
+  S.stallFlash = (engaged && S.rpm<CAR.stall+30 && Math.abs(S.v)<1 && S.gear>0)?1:0;
+}
+
+/* =====================================================================
+   DRAWING
+   ===================================================================== */
+const lc=document.getElementById('leftScreen').getContext('2d');
+const cc=document.getElementById('centerScreen').getContext('2d');
+const rc=document.getElementById('rightScreen').getContext('2d');
+
+/* all-red cluster palette: black faces, red markings/needles,
+   Mazda amber-orange digital numerals */
+const COL={
+  ring:'#1c1c1e', tick:'#ff3b30', minor:'#a83228',
+  amber:'#ff9d2e', red:'#ff3b30', green:'#39d353', blue:'#4aa3ff', white:'#ff3b30', dim:'#4a4a4a'
+};
+
+function circleFace(ctx,cx,cy,r){
+  ctx.save();
+  ctx.fillStyle='#000';
+  ctx.beginPath(); ctx.arc(cx,cy,r,0,TAU); ctx.fill();
+  ctx.restore();
+}
+
+const C2F=c=>Math.round(c*9/5+32);
+
+/* tiny corner gauge (OEM '79 style): arc + needle + micro label */
+function drawMiniGauge(ctx,cx,cy,r,val,vMin,vMax,label,color,warn){
+  const start=PI*0.8, end=PI*2.2, span=end-start;
+  const frac=clamp((val-vMin)/(vMax-vMin),0,1);
+  const ang=start+span*frac;
+  circleFace(ctx,cx,cy,r);
+  // ticks
+  ctx.lineWidth=1;
+  for(let i=0;i<=4;i++){
+    const a=start+span*i/4;
+    ctx.strokeStyle=i%2===0?COL.tick:COL.minor;
+    ctx.beginPath();
+    ctx.moveTo(cx+Math.cos(a)*r*0.62,cy+Math.sin(a)*r*0.62);
+    ctx.lineTo(cx+Math.cos(a)*r*0.72,cy+Math.sin(a)*r*0.72);
+    ctx.stroke();
+  }
+  // needle
+  ctx.strokeStyle=COL.red; ctx.lineWidth=2.5; ctx.lineCap='round';
+  ctx.beginPath();
+  ctx.moveTo(cx-Math.cos(ang)*r*0.15,cy-Math.sin(ang)*r*0.15);
+  ctx.lineTo(cx+Math.cos(ang)*r*0.6,cy+Math.sin(ang)*r*0.6);
+  ctx.stroke();
+  ctx.fillStyle='#111'; ctx.beginPath(); ctx.arc(cx,cy,2.5,0,TAU); ctx.fill();
+  // label under
+  ctx.fillStyle=warn?color:COL.dim; ctx.textAlign='center';
+  ctx.font='bold 7px sans-serif';
+  ctx.fillText(label,cx,cy+r+9);
+}
+
+function drawArcGauge(ctx,cx,cy,r,val,vMin,vMax,label,unit,color,fmt){
+  const start=PI*0.8, end=PI*2.2, span=end-start;
+  const frac=clamp((val-vMin)/(vMax-vMin),0,1);
+  const ang=start+span*frac;
+  circleFace(ctx,cx,cy,r);
+
+  ctx.lineWidth=1.5;
+  for(let i=0;i<=10;i++){
+    const a=start+span*i/10;
+    const major=i%5===0;
+    const r1=r*(major?0.72:0.78), r2=r*0.84;
+    ctx.strokeStyle=major?COL.tick:COL.minor;
+    ctx.beginPath();
+    ctx.moveTo(cx+Math.cos(a)*r1,cy+Math.sin(a)*r1);
+    ctx.lineTo(cx+Math.cos(a)*r2,cy+Math.sin(a)*r2);
+    ctx.stroke();
+  }
+  // needle only (no color arc) — thick red pointer
+  ctx.strokeStyle=COL.red; ctx.lineWidth=3.5; ctx.lineCap='round';
+  ctx.beginPath();
+  ctx.moveTo(cx-Math.cos(ang)*r*0.12,cy-Math.sin(ang)*r*0.12);
+  ctx.lineTo(cx+Math.cos(ang)*r*0.72,cy+Math.sin(ang)*r*0.72);
+  ctx.stroke();
+  ctx.fillStyle='#000'; ctx.beginPath(); ctx.arc(cx,cy,4,0,TAU); ctx.fill();
+
+  // digital readout + label — amber like bulb-lit numerals
+  ctx.fillStyle=COL.amber; ctx.textAlign='center';
+  ctx.font='bold 15px "Courier New",monospace';
+  ctx.fillText(fmt(val)+unit,cx,cy+r*0.55);
+  ctx.fillStyle=COL.tick; ctx.font='bold 9px sans-serif';
+  ctx.fillText(label,cx,cy-r*0.45);
+}
+
+/* ---------- center: one big Tach circle + gear/odo + OEM warning-lamp row ---------- */
+function drawCenter(){
+  const ctx=cc; ctx.clearRect(0,0,320,320);
+  drawBigDial(ctx,160,148,138,true);
+
+  // gear indicator top-left corner — plain bulb-lit numeral (no border)
+  const gx=30,gy=28;
+  ctx.save();
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  const gi=S.gear===-1?'R':S.gear===0?'N':String(S.gear);
+  const col=S.gear===-1?COL.red:COL.amber;
+  ctx.fillStyle=col; ctx.font='bold 26px "Courier New",monospace';
+  if(S.gearFlash>0){ ctx.shadowColor=col; ctx.shadowBlur=10; }
+  ctx.fillText(gi,gx,gy+1);
+  ctx.restore();
+
+  // REV limiter lamp top-right corner
+  lamp(ctx,290,26,'REV', S.revLimiter?COL.red:'#241a10', S.revLimiter>0);
+
+  // odometer / trip strip below the circle
+  ctx.save();
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillStyle=COL.white; ctx.font='bold 11px "Courier New",monospace';
+  ctx.fillText(S.odometer.toFixed(1).padStart(9,'0'),110,305);
+  ctx.fillStyle=COL.amber; ctx.font='bold 10px "Courier New",monospace';
+  ctx.fillText('TRIP '+S.trip.toFixed(1),235,305);
+  ctx.restore();
+}
+
+/* ---------- right: big Speedo circle + gear (no border) ---------- */
+function drawRight(){
+  const ctx=rc; ctx.clearRect(0,0,240,320);
+  drawBigDial(ctx,120,160,106,false);
+
+  // gear indicator top-right corner — plain bulb-lit numeral (no border)
+  const gx=208,gy=30;
+  ctx.save();
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  const gi=S.gear===-1?'R':S.gear===0?'N':String(S.gear);
+  const col=S.gear===-1?COL.red:COL.amber;
+  ctx.fillStyle=col; ctx.font='bold 26px "Courier New",monospace';
+  if(S.gearFlash>0){ ctx.shadowColor=col; ctx.shadowBlur=10; }
+  ctx.fillText(gi,gx,gy+1);
+  ctx.restore();
+}
+
+/* warning-indicator strip: toggles the .on class on the DOM lamp rectangles */
+const LAMPS=[
+  {id:'lBrake',   get:()=>S.brake>0.05 || !S.running},      // pedal pressed / parked
+  {id:'lCoolant', get:()=>S.coolT>100},                     // overheat
+  {id:'lGen',     get:()=>!S.running || S.volt<12.2},       // alternator not charging
+  {id:'lOil',     get:()=>S.oilT>110 || (!S.running && S.time>0.5)}, // high oil temp / no pressure
+  {id:'lBelt',    get:()=>false},                           // seat-belt (static self-test)
+  {id:'lLamp',    get:()=>true},                            // headlamp indicator (on)
+];
+const lampEls=LAMPS.map(l=>({el:document.getElementById(l.id),get:l.get}));
+function updateLamps(){
+  for(const l of lampEls){
+    if(!l.el) continue;
+    l.el.classList.toggle('on', !!l.get());
+  }
+}
+
+/* ---------- left: one big gauge, button cycles all 4 ---------- */
+function drawLeft(){
+  const ctx=lc; ctx.clearRect(0,0,240,320);
+  let warn='';
+  switch(S.leftPage){
+    case 0:
+      drawArcGauge(ctx,120,160,105, S.fuel*100, 0,100,'FUEL LEVEL','%',
+        S.fuel<0.15?COL.red:COL.amber, v=>v.toFixed(0));
+      if(S.fuel<0.12) warn='LOW FUEL';
+      break;
+    case 1:
+      drawArcGauge(ctx,120,160,105, S.oilT, 0,150,'OIL TEMP','°F',
+        S.oilT>110?COL.red:COL.amber, v=>String(C2F(v)));
+      if(S.oilT>110) warn='HIGH OIL TEMP';
+      break;
+    case 2:
+      drawArcGauge(ctx,120,160,105, S.coolT, 0,130,'COOLANT TEMP','°F',
+        S.coolT>100?COL.red:COL.amber, v=>String(C2F(v)));
+      if(S.coolT>100) warn='OVERHEAT';
+      break;
+    case 3:
+      drawArcGauge(ctx,120,160,105, S.volt, 10,16,'BATTERY VOLTAGE','V',
+        S.volt<12.2&&S.running?COL.red:COL.amber, v=>v.toFixed(1));
+      if(S.volt<12.2&&S.running) warn='LOW VOLTAGE';
+      break;
+  }
+  // warning text under gauge
+  ctx.save(); ctx.textAlign='center'; ctx.font='bold 9px sans-serif';
+  ctx.fillStyle=COL.red; ctx.fillText(warn,120,285);
+  // page dots (4) at bottom — amber when active
+  for(let i=0;i<4;i++){
+    ctx.fillStyle=i===S.leftPage?COL.amber:'#3a3a3a';
+    ctx.beginPath(); ctx.arc(96+i*16,310,3,0,TAU); ctx.fill();
+  }
+  ctx.restore();
+}
+function lamp(ctx,x,y,label,color,on){
+  ctx.save();
+  ctx.fillStyle=color; ctx.shadowColor=color; ctx.shadowBlur=on?8:0;
+  ctx.beginPath(); ctx.arc(x,y,6,0,TAU); ctx.fill();
+  ctx.shadowBlur=0;
+  ctx.fillStyle=on?COL.red:COL.dim; ctx.font='bold 8px sans-serif'; ctx.textAlign='center';
+  ctx.fillText(label,x,y+16);
+  ctx.restore();
+}
+
+function drawBigDial(ctx,cx,cy,r,isTach){
+  const start=PI*0.75, end=PI*2.25, span=end-start;
+  circleFace(ctx,cx,cy,r);
+
+  // tach: 0..8 (×1000 RPM).  speedo: outer MPH 0..100, inner KM/H 0..160.
+  const MS2KMH=1.609344;
+  const maxMph=100, maxKmh=160;
+  const val = isTach ? S.rpmNeedle*8 : Math.abs(S.v)*2.23694; // m/s→km/h
+  const mphVal = isTach ? 0 : val/MS2KMH;
+
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+
+  if(isTach){
+    /* dense 3-tier graduations: majors every 1000rpm, mids 500, minors 250 */
+    const minorStep=0.25, nMinor=Math.round(8/minorStep);
+    for(let i=0;i<=nMinor;i++){
+      const v=i*minorStep;
+      const a=start+span*(v/8);
+      const cos=Math.cos(a),sin=Math.sin(a);
+      const isMajor=Math.abs(v-Math.round(v))<1e-6;
+      const isMid=!isMajor && Math.abs(v*2-Math.round(v*2))<1e-6;
+      let r1,lw,col;
+      if(isMajor){ r1=r*0.70; lw=2.5; col=COL.tick; }
+      else if(isMid){ r1=r*0.76; lw=1.6; col=COL.minor; }
+      else { r1=r*0.81; lw=1; col='#5a5a5a'; }
+      ctx.strokeStyle=col; ctx.lineWidth=lw;
+      ctx.beginPath(); ctx.moveTo(cx+cos*r1,cy+sin*r1); ctx.lineTo(cx+cos*r*0.86,cy+sin*r*0.86); ctx.stroke();
+      if(isMajor){
+        const lr=r*0.56;
+        ctx.fillStyle=COL.tick; ctx.font=`bold ${Math.max(10,Math.round(r*0.105))}px "Courier New",monospace`;
+        ctx.fillText(String(Math.round(v)),cx+cos*lr,cy+sin*lr);
+      }
+    }
+    // redline zone — Mazda red
+    const a1=start+span*(CAR.redline/CAR.maxRpm);
+    ctx.strokeStyle=COL.red; ctx.lineWidth=Math.max(4,r*0.045); ctx.shadowColor=COL.red; ctx.shadowBlur=8;
+    ctx.beginPath(); ctx.arc(cx,cy,r*0.9,a1,end); ctx.stroke(); ctx.shadowBlur=0;
+    // ×1000 scale caption near top-center of the numbered ring
+    ctx.fillStyle=COL.tick; ctx.textAlign='center';
+    ctx.font=`bold ${Math.max(8,Math.round(r*0.06))}px sans-serif`;
+    ctx.fillText('x1000',cx,cy-r*0.34);
+  } else {
+    /* SPEEDO dual scale. Outer ticks + big white numbers = MPH (0..100).
+       Inner smaller amber numbers = KM/H (0..160), aligned to same angle. */
+    const minorStep=5, nMinor=Math.round(maxMph/minorStep);   // mph minor every 5
+    for(let i=0;i<=nMinor;i++){
+      const mph=i*minorStep;
+      const a=start+span*(mph/maxMph);
+      const cos=Math.cos(a),sin=Math.sin(a);
+      const isMajor=mph%10===0;          // MPH numbered every 10
+      const isMid=!isMajor && mph%5===0;
+      let r1,lw,col;
+      if(isMajor){ r1=r*0.72; lw=2.5; col=COL.tick; }
+      else { r1=r*0.82; lw=1; col='#5a5a5a'; }
+      ctx.strokeStyle=col; ctx.lineWidth=lw;
+      ctx.beginPath(); ctx.moveTo(cx+cos*r1,cy+sin*r1); ctx.lineTo(cx+cos*r*0.88,cy+sin*r*0.88); ctx.stroke();
+      if(isMajor){
+        ctx.fillStyle=COL.tick; ctx.font=`bold ${Math.max(10,Math.round(r*0.10))}px "Courier New",monospace`;
+        const lr=r*0.60;
+        ctx.fillText(String(mph),cx+cos*lr,cy+sin*lr);
+      }
+    }
+    // inner KM/H ring — smaller amber numerals at their own angle positions
+    ctx.fillStyle=COL.amber; ctx.font=`bold ${Math.max(8,Math.round(r*0.065))}px "Courier New",monospace`;
+    for(let kmh=0;kmh<=maxKmh;kmh+=20){
+      const a=start+span*((kmh/MS2KMH)/maxMph);   // map km/h value onto mph scale angle
+      const cos=Math.cos(a),sin=Math.sin(a);
+      const lr=r*0.44;
+      ctx.fillText(String(kmh),cx+cos*lr,cy+sin*lr);
+    }
+    // small unit captions
+    ctx.font=`bold ${Math.max(7,Math.round(r*0.055))}px sans-serif`;
+    ctx.fillStyle=COL.tick; ctx.fillText('MPH',cx,cy-r*0.30);
+    ctx.fillStyle=COL.amber; ctx.fillText('KM/H',cx,cy-r*0.16);
+    // redline zone above ~87 mph
+    const a1=start+span*(87/maxMph);
+    ctx.strokeStyle=COL.red; ctx.lineWidth=Math.max(3,r*0.035);
+    ctx.beginPath(); ctx.arc(cx,cy,r*0.9,a1,end); ctx.stroke();
+  }
+
+  // needle angle from value (no color arc — needle only)
+  const frac=isTach?clamp(val/8,0,1):clamp(mphVal/maxMph,0,1);
+  const ang=start+span*frac;
+
+  // thick tapered red needle (slight idle wobble on tach)
+  const wob=isTach?Math.sin(S.time*47)*0.004*(S.running?1-clamp(S.rpmNeedle,0,1):0):0;
+  const na=ang+wob;
+  ctx.save(); ctx.translate(cx,cy); ctx.rotate(na);
+  ctx.fillStyle=COL.red;
+  ctx.beginPath(); ctx.moveTo(-r*0.08,-5); ctx.lineTo(r*0.74,-2); ctx.lineTo(r*0.74,2); ctx.lineTo(-r*0.08,5); ctx.closePath(); ctx.fill();
+  ctx.restore();
+  ctx.fillStyle='#000'; ctx.beginPath(); ctx.arc(cx,cy,9,0,TAU); ctx.fill();
+
+  // digital readout — amber bulb-lit numerals
+  ctx.textAlign='center';
+  ctx.fillStyle=isTach?(S.rpm>CAR.redline?COL.red:COL.amber):COL.amber;
+  ctx.font=`bold ${Math.round(r*0.17)}px "Courier New",monospace`;
+  if(isTach){
+    ctx.fillText(String(Math.round(S.rpm/50)*50),cx,cy+r*0.42);
+    ctx.fillStyle=COL.tick; ctx.font=`bold ${Math.max(9,Math.round(r*0.07))}px sans-serif`;
+    ctx.fillText('RPM',cx,cy+r*0.60);
+  } else {
+    ctx.fillText(String(Math.round(mphVal)),cx,cy+r*0.42);
+    ctx.fillStyle=COL.amber; ctx.font=`bold ${Math.max(8,Math.round(r*0.06))}px "Courier New",monospace`;
+    ctx.fillText('('+Math.round(val)+' km/h)',cx,cy+r*0.58);
+  }
+}
+
+/* ---------- side mini gauges ---------- */
+/* ---------- main loop ---------- */
+let last=performance.now();
+function frame(now){
+  let dt=(now-last)/1000; last=now;
+  dt=Math.min(dt,0.05);
+  step(dt);
+  drawLeft(); drawCenter(); drawRight();
+  updateLamps();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
